@@ -26,6 +26,12 @@ hidden_size = 256
 output_size = 10
 learning_rate = 0.5
 
+# Energy model parameters (full model)
+k1 = 1.0   # linear energy cost
+k3 = 0.1   # cubic energy cost
+Kc = 0.005 # pruning threshold on per-weight energy (E(w) < Kc -> prune)
+energy_lambda = 0.0002   # lambda in loss: L_total = L_ce + lambda * E_tot
+
 np.random.seed(42)
 W1 = np.random.randn(input_size, hidden_size) * 0.01
 b1 = np.zeros(hidden_size)
@@ -48,15 +54,24 @@ def accuracy(X, y, W1, b1, W2, b2):
     _, o = forward(X, W1, b1, W2, b2)
     return np.mean(np.argmax(o, axis=1) == y)
 
+# helpers for the full energy model
+def energy_per_weight(W, k1=k1, k3=k3):
+    """Return per-weight energy E(w) = k1*|w| + k3*|w|^3"""
+    return k1 * np.abs(W) + k3 * (np.abs(W) ** 3)
+
+def dE_dW(W, k1=k1, k3=k3):
+    """Derivative dE/dw = k1*sign(w) + 3*k3*w^2*sign(w).
+    At w==0 the gradient is 0 (np.sign(0)==0).
+    """
+    return k1 * np.sign(W) + 3.0 * k3 * (W ** 2) * np.sign(W)
+
 # =============================================
-# TRAINING MET ENERGIE-STRAF & PRUNING
+# TRAINING MET ENERGIE-STRAF & PRUNING (VOLLEDIG ENERGIEMODEL)
 # =============================================
 epochs = 30
 batch_size = 256
-energy_lambda = 0.0002   # L1-straf (hoe hoger, hoe meer gewichten richting 0)
-Kc = 0.005               # Drempel: gewichten onder Kc worden nul
 
-print("🔋 Training met energie-straf en pruning...")
+print("🔋 Training met volledige energie-straf en energy-based pruning...")
 
 history = {'acc': [], 'pruned': [], 'energy': []}
 
@@ -72,29 +87,42 @@ for epoch in range(epochs):
 
         h, o = forward(Xb, W1, b1, W2, b2)
         error = o - yb
-        d_o = error  # softmax afgeleide
+        d_o = error  # softmax derivative when using one-hot + cross-entropy
         d_h = np.dot(d_o, W2.T) * h * (1 - h)
 
-        # L1-energiestraf: voeg sign(W) toe aan gradient
-        W2 -= learning_rate * (np.dot(h.T, d_o) / batch_size + energy_lambda * np.sign(W2))
-        b2 -= learning_rate * np.sum(d_o, axis=0) / batch_size
-        W1 -= learning_rate * (np.dot(Xb.T, d_h) / batch_size + energy_lambda * np.sign(W1))
-        b1 -= learning_rate * np.sum(d_h, axis=0) / batch_size
+        # Compute gradients from data loss
+        grad_W2 = np.dot(h.T, d_o) / batch_size
+        grad_b2 = np.sum(d_o, axis=0) / batch_size
+        grad_W1 = np.dot(Xb.T, d_h) / batch_size
+        grad_b1 = np.sum(d_h, axis=0) / batch_size
 
-    # Pruning: zet kleine gewichten op nul
-    W1[np.abs(W1) < Kc] = 0.0
-    W2[np.abs(W2) < Kc] = 0.0
+        # Energy derivative (full model)
+        dE_W2 = dE_dW(W2)
+        dE_W1 = dE_dW(W1)
+
+        # Update weights: include lambda * dE/dW term
+        W2 -= learning_rate * (grad_W2 + energy_lambda * dE_W2)
+        b2 -= learning_rate * grad_b2
+        W1 -= learning_rate * (grad_W1 + energy_lambda * dE_W1)
+        b1 -= learning_rate * grad_b1
+
+    # Energy-based pruning: compute per-weight energy and prune by E(w) < Kc
+    E_w1 = energy_per_weight(W1)
+    E_w2 = energy_per_weight(W2)
+
+    W1[E_w1 < Kc] = 0.0
+    W2[E_w2 < Kc] = 0.0
 
     # Metingen
     acc = accuracy(X_test, y_test, W1, b1, W2, b2)
     pruned = np.sum(W1 == 0) + np.sum(W2 == 0)
-    energy = np.sum(np.abs(W1)) + np.sum(np.abs(W2))  # L1-norm als energiemaat
+    energy = np.sum(E_w1) + np.sum(E_w2)  # total energy according to full model
 
     history['acc'].append(acc)
     history['pruned'].append(pruned)
     history['energy'].append(energy)
 
-    print(f"Epoch {epoch+1:2d} | Acc: {acc:.4f} | Pruned: {pruned} | Energy: {energy:.4f}")
+    print(f"Epoch {epoch+1:2d} | Acc: {acc:.4f} | Pruned: {pruned} | Energy: {energy:.6f}")
 
 print("✅ Training voltooid!")
 
@@ -109,19 +137,6 @@ sparse_W2 = [(i, j, W2[i, j]) for i in range(W2.shape[0]) for j in range(W2.shap
 print(f"🔹 Sparse W1: {len(sparse_W1)}/{W1.size} verbindingen")
 print(f"🔹 Sparse W2: {len(sparse_W2)}/{W2.size} verbindingen")
 
-def sparse_predict(x, sparse_W1, b1, sparse_W2, b2):
-    h = np.zeros(len(b1))
-    for i, j, val in sparse_W1:
-        h[j] += x[i] * val
-    h = sigmoid(h + b1)
-
-    o = np.zeros(len(b2))
-    for i, j, val in sparse_W2:
-        o[j] += h[i] * val
-    o = softmax(o + b2)  # let op: softmax werkt op 2D, pas aan voor 1D
-    return o
-
-# Softmax voor 1D
 def softmax_1d(x):
     e_x = np.exp(x - np.max(x))
     return e_x / np.sum(e_x)
@@ -147,7 +162,7 @@ for i in range(1000):
     if np.argmax(pred) == y_test[i]:
         correct += 1
 duration = time.time() - start
-print(f"✅ Sparse acc: {correct/10:.1f}% (1000 samples)")
+print(f"✅ Sparse acc: {correct/1000:.4f} (1000 samples)")
 print(f"⏱️  Tijd voor 1000 samples: {duration*1000:.2f} ms")
 
 # =============================================
@@ -174,7 +189,7 @@ axs[1].set_ylabel('Aantal nullen')
 axs[1].legend()
 axs[1].grid(True)
 
-axs[2].plot(history['energy'], label='Energie (L1-norm)', color='green')
+axs[2].plot(history['energy'], label='Energie (volledige model)', color='green')
 axs[2].set_ylabel('Energie')
 axs[2].set_xlabel('Epoch')
 axs[2].legend()
