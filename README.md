@@ -128,12 +128,18 @@ Run the pruning version:
 ```bash
 python mnist_pruning_energy.py
 ```
-
 The script downloads MNIST, trains the model, applies pruning, shows accuracy and speed‑up, and saves a plot as `mnist_pruning_result.png`.
+
+## File explanation
+mnist_pruning3.py is the baseline model
+mnist_pruning3_energy.py is the model after pruning (updated by copilot)
+mnist_pruning3_energy2.py is the model after pruning (updated by me as suggested by copilot)
+
+Both show a significant increase in energy savings while maintaining functionality therefore accuracy
 
 ## License
 
-All rights reserved. You may view and use the code for personal or educational purposes; redistribution requires permission.
+All rights reserved. You may view the code for personal or educational purposes; using and redistribution requires permission.
 
 ## Author
 
